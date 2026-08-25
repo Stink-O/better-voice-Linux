@@ -915,13 +915,6 @@ class AppController(QtCore.QObject):
             elif previous is not None:
                 clipboard.restore(previous)
 
-        if not clipboard.copy_images_only(images, self.text_insertion):
-            # Nothing can serve a picture on its own here, so there is no second
-            # paste to send; settle the clipboard as the mode asks and stop.
-            log.info("Screenshots cannot be pasted on this desktop; leaving them on disk")
-            settle(finish)
-            return
-
         def send() -> None:
             self.text_insertion.paste(workers.on_main_thread(delivered))
 
@@ -930,7 +923,23 @@ class AppController(QtCore.QObject):
                 log.info("The screenshots were not pasted; they stay on the clipboard")
             settle(finish)
 
-        settle(send)
+        def swap_to_images() -> None:
+            """Replace the transcript with the screenshots, once it has landed."""
+
+            if not clipboard.copy_images_only(images, self.text_insertion):
+                # Nothing can serve a picture on its own here, so there is no
+                # second paste to send; settle the clipboard and stop.
+                log.info("Screenshots cannot be pasted on this desktop; leaving them on disk")
+                settle(finish)
+                return
+            settle(send)
+
+        # A paste is reported done when the keystroke has been *sent*, not when
+        # the other application has read the clipboard. Swapping it out at once
+        # races that read, and the first paste delivers the screenshot instead
+        # of the transcript -- so the picture arrives twice and the words never
+        # do. Give the transcript the same moment to land that macOS gives it.
+        settle(swap_to_images)
 
     def _report_delivery(
         self,

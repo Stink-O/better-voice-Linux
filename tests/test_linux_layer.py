@@ -1663,7 +1663,7 @@ class TestScreenshotsArePastedAfterTheTranscript:
     need a selection of their own and a keystroke of their own.
     """
 
-    def _controller(self, qt_app, monkeypatch, serves=True):
+    def _controller(self, qt_app, monkeypatch, serves=True, tmp_path=None):
         from bettervoice import app as app_module
 
         monkeypatch.setattr(app_module.AppController, "__init__", lambda self, _a: None)
@@ -1693,10 +1693,12 @@ class TestScreenshotsArePastedAfterTheTranscript:
             app_module.clipboard, "restore",
             lambda previous, only_if_holding=None: events.append(("restore", None)) or True,
         )
-        # Run the settle timers immediately so the chain completes in the test.
+        # Run the settle timers immediately so the chain completes in the test,
+        # recording each delay so the ordering can be asserted.
+        events.append(("start", None))
         monkeypatch.setattr(
             app_module.QtCore.QTimer, "singleShot",
-            staticmethod(lambda _ms, callback: callback()),
+            staticmethod(lambda ms, callback: events.append(("settle", ms)) or callback()),
         )
         monkeypatch.setattr(app_module.workers, "on_main_thread", lambda fn: fn)
         return controller, events
@@ -1721,6 +1723,42 @@ class TestScreenshotsArePastedAfterTheTranscript:
             "a text format here means a duplicated transcript"
         )
         assert "text/html" not in offered
+
+    def test_the_transcript_is_given_time_to_land_before_the_swap(
+        self, qt_app, monkeypatch, tmp_path
+    ):
+        """A paste is done when the keystroke is *sent*, not when it is read.
+
+        Swapping the clipboard the instant the first paste returns races the
+        other application's read of it, and the screenshot is delivered twice
+        while the transcript is never delivered at all.
+        """
+
+        from bettervoice import app as app_module
+
+        controller, events = self._controller(qt_app, monkeypatch, tmp_path=tmp_path)
+
+        controller._paste_images_after("hello", self._images(tmp_path), True, None)
+
+        kinds = [kind for kind, _ in events]
+        assert "selection" in kinds, "the screenshots were never offered"
+        first_settle = kinds.index("settle")
+        swap = kinds.index("selection")
+        assert first_settle < swap, (
+            "the clipboard was replaced before the transcript had a chance to land"
+        )
+        delay = next(value for kind, value in events if kind == "settle")
+        assert delay >= app_module.CLIPBOARD_SETTLE_MS
+
+    def test_the_second_paste_comes_after_the_swap(self, qt_app, monkeypatch, tmp_path):
+        controller, events = self._controller(qt_app, monkeypatch, tmp_path=tmp_path)
+
+        controller._paste_images_after("hello", self._images(tmp_path), True, None)
+
+        kinds = [kind for kind, _ in events]
+        assert kinds.index("selection") < kinds.index("paste"), (
+            "the second keystroke must not be sent before the screenshots are on offer"
+        )
 
     def test_a_second_paste_is_sent(self, qt_app, monkeypatch, tmp_path):
         controller, events = self._controller(qt_app, monkeypatch)

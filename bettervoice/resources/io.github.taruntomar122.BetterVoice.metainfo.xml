@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.taruntomar122.BetterVoice</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+
+  <developer id="io.github.taruntomar122">
+    <name>Tarun Tomar</name>
+  </developer>
+
+  <name>BetterVoice</name>
+  <summary>Voice dictation with the screen context you point at</summary>
+
+  <description>
+    <p>
+      BetterVoice lives in your system tray. Hold a shortcut and talk; it
+      transcribes locally and types the result into whatever field you were
+      already using.
+    </p>
+    <p>
+      While you talk, circle anything on screen with the pointer and BetterVoice
+      captures that display with a highlight around what you referenced, so the
+      words and the picture arrive together.
+    </p>
+    <p>
+      Nothing is uploaded. Speech recognition and the optional grammar cleanup
+      both run on your own machine.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.taruntomar122.BetterVoice.desktop</launchable>
+  <url type="homepage">https://github.com/TarunTomar122/better-voice</url>
+  <url type="bugtracker">https://github.com/TarunTomar122/better-voice/issues</url>
+
+  <categories>
+    <category>Utility</category>
+    <category>Accessibility</category>
+  </categories>
+
+  <keywords>
+    <keyword>voice</keyword>
+    <keyword>dictation</keyword>
+    <keyword>speech</keyword>
+    <keyword>transcription</keyword>
+  </keywords>
+
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-08-24">
+      <description>
+        <p>First Linux release: tray icon, local transcription, circle-to-capture,
+        and portal-based shortcuts, screen capture and transcript insertion.</p>
+      </description>
+    </release>
+  </releases>
+</component>

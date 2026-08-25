@@ -1,0 +1,18 @@
+[Unit]
+Description=BetterVoice voice dictation
+Documentation=https://github.com/TarunTomar122/better-voice
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+# The unit is already this application's own cgroup, which is how the XDG
+# portals identify BetterVoice; the launcher must not nest another scope inside.
+Environment=BETTERVOICE_NO_SCOPE=1
+ExecStart=%h/.local/bin/bettervoice
+Restart=on-failure
+RestartSec=5
+Slice=app.slice
+
+[Install]
+WantedBy=graphical-session.target

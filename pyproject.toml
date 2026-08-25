@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bettervoice"
+version = "0.1.0"
+description = "Voice dictation with the screen context you point at — Linux port"
+readme = "README-linux.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+classifiers = [
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    "PyQt6>=6.6",
+    "numpy>=1.24",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12",
+    "onnxruntime>=1.17",
+    "onnx-asr>=0.6",
+    "huggingface_hub>=0.23",
+    "tokenizers>=0.19",
+    "jeepney>=0.8",
+]
+
+[project.optional-dependencies]
+# Only needed on X11 sessions, where the pointer and modifiers come from Xlib.
+x11 = ["python-xlib>=0.33"]
+# Only needed where /dev/input is readable and the raw modifier backend is used.
+evdev = ["evdev>=1.6"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+bettervoice = "bettervoice.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/TarunTomar122/better-voice"
+
+[tool.setuptools.packages.find]
+include = ["bettervoice*"]
+
+[tool.setuptools.package-data]
+# The XDG portals identify the app by its desktop entry, so a wheel has to
+# carry one; `bettervoice --install-desktop-entry` writes it out.
+"bettervoice.resources" = ["*.desktop", "*.svg", "*.xml", "*.service"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Correctness over style. Qt subclasses override methods with signatures the
+# base class does not use (ARG002) and paint helpers take the arguments Qt
+# hands them, so the unused-argument families are noise here rather than signal.
+select = ["E9", "F", "B", "A", "C4", "PIE", "RET", "PTH", "LOG", "RUF", "SIM"]
+ignore = [
+    "B905",    # zip(points, points[1:]) is deliberate pairwise iteration
+    "SIM105",  # contextlib.suppress hides which call is allowed to fail
+    "SIM300",  # reads worse in assertions
+    "RET504",  # a named result is often the clearer half of a function
+    "TRY003",  # the error classes carry their own messages
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]

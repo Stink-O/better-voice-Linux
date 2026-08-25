@@ -10,9 +10,10 @@ Better Voice is a small native Swift app with one executable target and one test
 4. Mouse events feed `CircleGestureDetector`; the overlay renders the trail without appearing in screenshots.
 5. A recognized gesture asks ScreenCaptureKit for the full display under the pointer, then draws the blue highlight into the saved PNG.
 6. FluidAudio transcribes the temporary audio file locally.
-7. The optional, off-by-default `t5-tiny-gec-hone` ONNX beta cleans up punctuation and sentence structure locally. When enabled, it preloads in the background after launch; incomplete or unavailable results fall back to the raw transcript.
-8. At stop, BetterVoice captures the focused app and field. `SessionOutput` writes `context.md`, sends one text-only paste to that app, then restores the full text-plus-image clipboard.
-9. `SessionStorage` deletes sessions older than 7 days and keeps the remaining folder below 500 MB.
+7. `VocabularyFile` supplies the user's own corrections, re-read whenever the file's modification date changes. The developer vocabulary beta applies them first, then a small deterministic casing/acronym pass, using the captured app to recognize terminals, editors, and AI chats. It preserves the raw wording and needs no model download.
+8. The optional, off-by-default `t5-tiny-gec-hone` ONNX beta cleans up punctuation and sentence structure locally. When enabled, it preloads in the background after launch; incomplete or unavailable results fall back to the raw transcript. Developer casing runs again afterward so technical terms survive the generic pass.
+9. At stop, BetterVoice captures the focused app and field. `SessionOutput` writes `context.md`, pastes the transcript, then pastes captured images into the same field when both are present. Quick notes restore the previous clipboard afterward; long explanations leave the captured images available on the clipboard. The menu bar's Recent submenu reads the latest valid local session for recovery.
+10. `SessionStorage` deletes sessions older than 7 days and keeps the remaining folder below 500 MB.
 
 ## Repository map
 
@@ -20,6 +21,9 @@ Better Voice is a small native Swift app with one executable target and one test
 Sources/BetterVoice/main.swift                 macOS app and system integrations
 Sources/BetterVoice/SetupView.swift            onboarding and actionable recovery UI
 Sources/BetterVoice/GrammarCorrector.swift     optional tiny local grammar pass
+Sources/BetterVoiceCore/DeveloperTextCleanup.swift
+                                                zero-download developer vocabulary pass
+Sources/BetterVoiceCore/VocabularyFile.swift   user-editable term corrections
 Sources/BetterVoiceCore/CircleGestureDetector.swift
 Sources/BetterVoiceCore/RecordingSoundCue.swift
 Sources/BetterVoiceCore/RecordingShortcutState.swift

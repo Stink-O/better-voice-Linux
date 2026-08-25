@@ -13,13 +13,15 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.1.5</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>BetterVoice records your voice while you describe screen changes.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>BetterVoice uses local transcription to turn your voice into text.</string>
 	<key>NSScreenCaptureUsageDescription</key>
 	<string>BetterVoice captures the screen areas you circle while recording.</string>
 </dict>

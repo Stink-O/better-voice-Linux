@@ -241,15 +241,23 @@ private enum GrammarModelState: Equatable {
 @MainActor
 private final class LocalTranscriber {
     private static let grammarCorrectionKey = "grammarCorrectionEnabled"
+    private static let developerCleanupKey = "developerCleanupEnabled"
     private(set) var state: LocalModelState = .missing
     private(set) var grammarModelState: GrammarModelState = .missing
     private var manager: AsrManager?
     private let grammarCorrector = GrammarCorrector()
+    private let vocabularyURL = VocabularyFile.defaultURL()
+    private var cachedVocabulary: [(String, String)] = []
+    private var cachedVocabularyStamp: Date?
     var onStateChange: (() -> Void)?
     var onGrammarStatus: ((String) -> Void)?
 
     var grammarCorrectionEnabled: Bool {
         UserDefaults.standard.object(forKey: Self.grammarCorrectionKey) as? Bool ?? false
+    }
+
+    var developerCleanupEnabled: Bool {
+        UserDefaults.standard.object(forKey: Self.developerCleanupKey) as? Bool ?? true
     }
 
     var isDownloaded: Bool {
@@ -275,6 +283,10 @@ private final class LocalTranscriber {
         UserDefaults.standard.set(enabled, forKey: Self.grammarCorrectionKey)
     }
 
+    func setDeveloperCleanupEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: Self.developerCleanupKey)
+    }
+
     func loadCachedGrammarModel() async {
         grammarModelState = await grammarCorrector.isCached() ? .ready : .missing
         onStateChange?()
@@ -293,16 +305,34 @@ private final class LocalTranscriber {
         onStateChange?()
     }
 
-    func transcribe(_ url: URL) async throws -> String {
+    /// Re-reads the user's map when the file changed, so an edit lands on the next
+    /// recording without restarting BetterVoice.
+    private func currentVocabulary() -> [(String, String)] {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: vocabularyURL.path)
+        let stamp = attributes?[.modificationDate] as? Date
+        if stamp != cachedVocabularyStamp {
+            cachedVocabulary = VocabularyFile.terms(at: vocabularyURL)
+            cachedVocabularyStamp = stamp
+        }
+        return cachedVocabulary
+    }
+
+    func transcribe(_ url: URL, profile: DeveloperAppProfile = .general) async throws -> String {
         guard let manager else { throw BetterVoiceError.localModelUnavailable }
         var decoderState = TdtDecoderState.make(decoderLayers: await manager.decoderLayerCount)
         let transcript = try await manager.transcribe(url, decoderState: &decoderState).text
-        guard grammarCorrectionEnabled else { return transcript }
-        guard transcript.split(whereSeparator: \.isWhitespace).count > 1 else { return transcript }
+        let vocabulary = developerCleanupEnabled ? currentVocabulary() : []
+        let developerCleaned = developerCleanupEnabled
+            ? DeveloperTextCleanup.apply(transcript, profile: profile, overrides: vocabulary)
+            : transcript
+        guard grammarCorrectionEnabled else { return developerCleaned }
+        guard developerCleaned.split(whereSeparator: \.isWhitespace).count > 1 else { return developerCleaned }
         onGrammarStatus?("Polishing transcript locally…")
-        let corrected = await grammarCorrector.correct(transcript)
+        let corrected = await grammarCorrector.correct(developerCleaned)
         onGrammarStatus?("Finishing…")
-        return corrected
+        return developerCleanupEnabled
+            ? DeveloperTextCleanup.apply(corrected, profile: profile, overrides: vocabulary)
+            : corrected
     }
 
     private func prepare(download: Bool) async {
@@ -365,7 +395,7 @@ private final class AudioRecorder {
     }
 
     func start(device: MicrophoneDevice) throws {
-        precondition(engine == nil)
+        guard engine == nil else { throw BetterVoiceError.sessionUnavailable }
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
         guard let audioUnit = inputNode.audioUnit else {
@@ -396,7 +426,9 @@ private final class AudioRecorder {
         inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { buffer, _ in
             guard ProcessInfo.processInfo.systemUptime >= recordingReadyAt else { return }
             try? file.write(from: buffer)
-            guard let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
+            guard buffer.format.channelCount > 0,
+                  let samples = buffer.floatChannelData?[0],
+                  buffer.frameLength > 0 else { return }
             var sum: Float = 0
             for index in 0..<Int(buffer.frameLength) {
                 sum += samples[index] * samples[index]
@@ -618,6 +650,7 @@ private final class TrailOverlayView: NSView {
             times: trail.map(\.time)
         )
         for segment in segments {
+            guard trail.indices.contains(segment.from), trail.indices.contains(segment.to) else { continue }
             let previous = trail[segment.from]
             let current = trail[segment.to]
             let age = max(0, now - current.time)
@@ -897,7 +930,7 @@ private final class RecordingHUDController {
     func showFinishingStatus(_ message: String) {
         guard view.isFinishing else { return }
         view.finishingMessage = message
-        view.setAccessibilityLabel("BetterVoice (message)")
+        view.setAccessibilityLabel("BetterVoice \(message)")
         view.needsDisplay = true
     }
 
@@ -925,6 +958,12 @@ private final class RecordingSoundController {
 
 @MainActor
 private enum SessionStorage {
+    struct RecentSession {
+        let folder: URL
+        let transcript: String
+        let images: [URL]
+    }
+
     static let maxAge: TimeInterval = 7 * 24 * 60 * 60
     static let maxBytes: Int64 = 500 * 1_024 * 1_024
 
@@ -965,6 +1004,72 @@ private enum SessionStorage {
         try FileManager.default.removeItem(at: root)
     }
 
+    static func latest() -> RecentSession? {
+        let manager = FileManager.default
+        guard let folders = try? manager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+
+        let candidates = folders.compactMap { folder -> (URL, Date)? in
+            guard isBetterVoiceSessionName(folder.lastPathComponent),
+                  let values = try? folder.resourceValues(forKeys: [
+                      .contentModificationDateKey,
+                      .isDirectoryKey,
+                      .isSymbolicLinkKey
+                  ]),
+                  values.isDirectory == true,
+                  values.isSymbolicLink != true
+            else { return nil }
+            return (folder, values.contentModificationDate ?? .distantPast)
+        }.sorted { $0.1 > $1.1 }
+
+        for (folder, _) in candidates {
+            let markdownURL = folder.appendingPathComponent("context.md")
+            guard let markdownValues = try? markdownURL.resourceValues(forKeys: [
+                .fileSizeKey,
+                .isRegularFileKey,
+                .isSymbolicLinkKey
+            ]),
+                  markdownValues.isRegularFile == true,
+                  markdownValues.isSymbolicLink != true,
+                  let fileSize = markdownValues.fileSize,
+                  fileSize <= 256 * 1_024
+            else { continue }
+            let markdown = (try? String(contentsOf: markdownURL, encoding: .utf8)) ?? ""
+            let marker = "\n\n## Screen context"
+            let transcript = markdown
+                .replacingOccurrences(of: "# BetterVoice session\n\n", with: "")
+                .components(separatedBy: marker)
+                .first?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "_No transcript captured._", with: "") ?? ""
+            let images = (try? manager.contentsOfDirectory(
+                at: folder,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ))?
+                .filter { url in
+                    guard url.lastPathComponent.hasPrefix("context-"),
+                          url.pathExtension.lowercased() == "png"
+                    else { return false }
+                    guard let values = try? url.resourceValues(forKeys: [
+                        .isRegularFileKey,
+                        .isSymbolicLinkKey
+                    ]) else { return false }
+                    return values.isRegularFile == true && values.isSymbolicLink != true
+                }
+                .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                ?? []
+
+            if !transcript.isEmpty || !images.isEmpty {
+                return RecentSession(folder: folder, transcript: transcript, images: images)
+            }
+        }
+        return nil
+    }
+
     static func allocatedBytes(in folder: URL) -> Int64 {
         let keys: Set<URLResourceKey> = [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey]
         guard let files = FileManager.default.enumerator(
@@ -983,6 +1088,7 @@ private enum SessionStorage {
 private final class SessionOutput {
     let folder: URL
     private(set) var images: [URL] = []
+    private(set) var clipboardToRestore: [Clipboard.SavedItem]?
     private var usedBytes: Int64
 
     init() throws {
@@ -1029,10 +1135,12 @@ private final class SessionOutput {
         }
         let markdownURL = folder.appendingPathComponent("context.md")
         try markdown.write(to: markdownURL, atomically: true, encoding: .utf8)
-        let previousClipboard: [NSPasteboardItem]? = shouldCopyToClipboard
-            ? nil
-            : (NSPasteboard.general.pasteboardItems ?? [])
+        clipboardToRestore = shouldCopyToClipboard ? nil : Clipboard.snapshot()
+        let previousClipboard = clipboardToRestore
         guard !trimmed.isEmpty, let insertionContext else {
+            if let previousClipboard, !shouldCopyToClipboard {
+                Clipboard.restore(previousClipboard, ifChangeCount: NSPasteboard.general.changeCount)
+            }
             return (
                 markdownURL,
                 shouldCopyToClipboard && Clipboard.copy(transcript: trimmed, images: images),
@@ -1059,14 +1167,7 @@ private final class SessionOutput {
             )
         }
 
-        if shouldCopyToClipboard, !images.isEmpty {
-            let transcriptToRestore = trimmed
-            let imagesToRestore = images
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                guard NSPasteboard.general.changeCount == pasteboardChangeCount else { return }
-                _ = Clipboard.copy(transcript: transcriptToRestore, images: imagesToRestore)
-            }
-        } else if let previousClipboard {
+        if images.isEmpty, let previousClipboard {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 Clipboard.restore(previousClipboard, ifChangeCount: pasteboardChangeCount)
             }
@@ -1077,9 +1178,12 @@ private final class SessionOutput {
 
 @MainActor
 private enum Clipboard {
+    struct SavedItem {
+        let representations: [(NSPasteboard.PasteboardType, Data)]
+    }
+
     static func copy(transcript: String, images: [URL]) -> Bool {
         let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
 
         let textItem = NSPasteboardItem()
         let rich = NSMutableAttributedString(string: transcript + (images.isEmpty ? "" : "\n\n"))
@@ -1112,8 +1216,10 @@ private enum Clipboard {
             }
             objects.append(textItem)
         }
-        guard !objects.isEmpty, pasteboard.writeObjects(objects) else {
-            return copyTextOnly(transcript)
+        guard !objects.isEmpty else { return false }
+        pasteboard.clearContents()
+        guard pasteboard.writeObjects(objects) else {
+            return transcript.isEmpty ? false : copyTextOnly(transcript)
         }
         return true
     }
@@ -1125,13 +1231,29 @@ private enum Clipboard {
         return pasteboard.setString(transcript, forType: .string)
     }
 
-    static func restore(_ items: [NSPasteboardItem], ifChangeCount expected: Int) {
+    static func snapshot() -> [SavedItem] {
+        (NSPasteboard.general.pasteboardItems ?? []).compactMap { item in
+            let representations = item.types.compactMap { type -> (NSPasteboard.PasteboardType, Data)? in
+                guard let data = item.data(forType: type) else { return nil }
+                return (type, data)
+            }
+            return representations.isEmpty ? nil : SavedItem(representations: representations)
+        }
+    }
+
+    static func restore(_ items: [SavedItem], ifChangeCount expected: Int) {
         let pasteboard = NSPasteboard.general
         guard pasteboard.changeCount == expected else { return }
         pasteboard.clearContents()
-        if !items.isEmpty {
-            _ = pasteboard.writeObjects(items)
+        let freshItems = items.map { savedItem in
+            let item = NSPasteboardItem()
+            for (type, data) in savedItem.representations {
+                _ = item.setData(data, forType: type)
+            }
+            return item
         }
+        guard !freshItems.isEmpty else { return }
+        _ = pasteboard.writeObjects(freshItems)
     }
 }
 
@@ -1140,6 +1262,8 @@ private enum TextInsertion {
     struct Context {
         let focusedElement: AXUIElement?
         let processIdentifier: pid_t
+        let applicationName: String?
+        let bundleIdentifier: String?
     }
 
     static func captureContext() -> Context? {
@@ -1155,14 +1279,20 @@ private enum TextInsertion {
             kAXFocusedUIElementAttribute as CFString,
             &focused
         ) == .success, let focused {
-            let candidate = focused as! AXUIElement
+            guard CFGetTypeID(focused) == AXUIElementGetTypeID() else { return nil }
+            let candidate = unsafeDowncast(focused, to: AXUIElement.self)
             var focusedProcessIdentifier: pid_t = 0
             if AXUIElementGetPid(candidate, &focusedProcessIdentifier) == .success,
                focusedProcessIdentifier == processIdentifier {
                 focusedElement = candidate
             }
         }
-        return Context(focusedElement: focusedElement, processIdentifier: processIdentifier)
+        return Context(
+            focusedElement: focusedElement,
+            processIdentifier: processIdentifier,
+            applicationName: application.localizedName,
+            bundleIdentifier: application.bundleIdentifier
+        )
     }
 
     static func paste(into context: Context) -> Bool {
@@ -1351,6 +1481,7 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
     private var recordingMenuItem: NSMenuItem?
     private var modelMenuItem: NSMenuItem?
     private var microphoneMenu: NSMenu?
+    private var recentMenu: NSMenu?
     private var statusAnimationTimer: Timer?
     private var statusFeedbackTimer: Timer?
     private var recordingLimitTimer: Timer?
@@ -1372,6 +1503,9 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
         model.setGrammarCorrection = { [weak self] enabled in
             self?.transcriber.setGrammarCorrectionEnabled(enabled)
         }
+        model.setDeveloperCleanup = { [weak self] enabled in
+            self?.transcriber.setDeveloperCleanupEnabled(enabled)
+        }
         model.refresh = { [weak self] in self?.refreshSetupModel() }
         model.complete = { [weak self] in
             UserDefaults.standard.set(true, forKey: "completedOnboarding")
@@ -1382,6 +1516,7 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AudioRecorder.removeAbandonedRecordings()
+        try? VocabularyFile.createTemplateIfMissing(at: VocabularyFile.defaultURL())
         microphones.refresh()
         reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         setStatusIcon(.idle)
@@ -1413,9 +1548,19 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
         menu.addItem(microphoneItem)
         menu.addItem(NSMenuItem.separator())
 
+        let recentItem = NSMenuItem(title: "Recent", action: nil, keyEquivalent: "")
+        let recentMenu = NSMenu()
+        recentItem.submenu = recentMenu
+        self.recentMenu = recentMenu
+        menu.addItem(recentItem)
+        menu.addItem(NSMenuItem.separator())
+
         let setupItem = NSMenuItem(title: "Getting Started…", action: #selector(showSetup), keyEquivalent: ",")
         setupItem.target = self
         menu.addItem(setupItem)
+        let vocabularyItem = NSMenuItem(title: "Edit Vocabulary…", action: #selector(editVocabulary), keyEquivalent: "")
+        vocabularyItem.target = self
+        menu.addItem(vocabularyItem)
         let sessionsItem = NSMenuItem(title: "Open Saved Sessions", action: #selector(openSavedSessions), keyEquivalent: "")
         sessionsItem.target = self
         menu.addItem(sessionsItem)
@@ -1437,6 +1582,7 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
             self?.refreshSetupModel()
         }
         setupModel.grammarCorrectionEnabled = transcriber.grammarCorrectionEnabled
+        setupModel.developerCleanupEnabled = transcriber.developerCleanupEnabled
         transcriber.onGrammarStatus = { [weak self] status in
             self?.recordingHUD.showFinishingStatus(status)
             self?.showStatus(status)
@@ -1483,6 +1629,63 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
         guard let statusMenu = statusItem.menu, menu === statusMenu else { return }
         microphones.refresh()
         refreshMicrophoneMenu()
+        refreshRecentMenu()
+    }
+
+    private func refreshRecentMenu() {
+        guard let recentMenu else { return }
+        recentMenu.removeAllItems()
+        guard let recent = SessionStorage.latest() else {
+            let empty = NSMenuItem(title: "No recent recording", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            recentMenu.addItem(empty)
+            return
+        }
+
+        let header = NSMenuItem(title: "Latest recording", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        recentMenu.addItem(header)
+
+        let copyAll = NSMenuItem(title: "Copy All", action: #selector(copyRecentContent(_:)), keyEquivalent: "")
+        copyAll.target = self
+        copyAll.representedObject = recent
+        recentMenu.addItem(copyAll)
+
+        if !recent.transcript.isEmpty {
+            let preview = NSMenuItem(title: "Text: \(menuPreview(recent.transcript))", action: nil, keyEquivalent: "")
+            preview.isEnabled = false
+            recentMenu.addItem(preview)
+
+            let copyText = NSMenuItem(title: "Copy Text", action: #selector(copyRecentTranscript(_:)), keyEquivalent: "")
+            copyText.target = self
+            copyText.representedObject = recent.transcript
+            recentMenu.addItem(copyText)
+        }
+
+        if !recent.images.isEmpty {
+            if !recent.transcript.isEmpty { recentMenu.addItem(.separator()) }
+            let copyImages = NSMenuItem(title: "Copy Images", action: #selector(copyRecentImages(_:)), keyEquivalent: "")
+            copyImages.target = self
+            copyImages.representedObject = recent.images
+            recentMenu.addItem(copyImages)
+
+            let openImages = NSMenuItem(title: "Open Images", action: #selector(openRecentImages(_:)), keyEquivalent: "")
+            openImages.target = self
+            openImages.representedObject = recent.images
+            recentMenu.addItem(openImages)
+        }
+
+        recentMenu.addItem(.separator())
+        let openFolder = NSMenuItem(title: "Open Session Folder", action: #selector(openRecentSession(_:)), keyEquivalent: "")
+        openFolder.target = self
+        openFolder.representedObject = recent.folder
+        recentMenu.addItem(openFolder)
+    }
+
+    private func menuPreview(_ text: String) -> String {
+        let preview = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        guard preview.count > 72 else { return preview }
+        return String(preview.prefix(69)) + "…"
     }
 
     private func refreshMicrophoneMenu() {
@@ -1626,12 +1829,68 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
         setupWindow.show(model: setupModel)
     }
 
+    /// Creates the template on demand too: a user who cleared the file still gets a
+    /// documented starting point instead of an editor opening on nothing.
+    @objc private func editVocabulary() {
+        let url = VocabularyFile.defaultURL()
+        try? VocabularyFile.createTemplateIfMissing(at: url)
+        NSWorkspace.shared.open(url)
+    }
+
     @objc private func openSavedSessions() {
         do {
             try FileManager.default.createDirectory(at: SessionStorage.root, withIntermediateDirectories: true)
             NSWorkspace.shared.open(SessionStorage.root)
         } catch {
             showError("Could not open saved sessions", detail: error.localizedDescription)
+        }
+    }
+
+    @objc private func copyRecentTranscript(_ item: NSMenuItem) {
+        guard let transcript = item.representedObject as? String,
+              Clipboard.copyTextOnly(transcript)
+        else {
+            showError("Could not copy recent transcript")
+            return
+        }
+        showStatus("Recent transcript copied", resetAfter: 3)
+    }
+
+    @objc private func copyRecentContent(_ item: NSMenuItem) {
+        guard let recent = item.representedObject as? SessionStorage.RecentSession,
+              Clipboard.copy(transcript: recent.transcript, images: recent.images)
+        else {
+            showError("Could not copy recent recording")
+            return
+        }
+        showStatus("Recent recording copied", resetAfter: 3)
+    }
+
+    @objc private func copyRecentImages(_ item: NSMenuItem) {
+        guard let images = item.representedObject as? [URL],
+              Clipboard.copy(transcript: "", images: images)
+        else {
+            showError("Could not copy recent images")
+            return
+        }
+        showStatus("Recent images copied", resetAfter: 3)
+    }
+
+    @objc private func openRecentImages(_ item: NSMenuItem) {
+        guard let images = item.representedObject as? [URL],
+              images.allSatisfy({ NSWorkspace.shared.open($0) })
+        else {
+            showError("Could not open recent images")
+            return
+        }
+    }
+
+    @objc private func openRecentSession(_ item: NSMenuItem) {
+        guard let folder = item.representedObject as? URL,
+              NSWorkspace.shared.open(folder)
+        else {
+            showError("Could not open recent session")
+            return
         }
     }
 
@@ -1768,6 +2027,12 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
         recordingLimitTimer?.invalidate()
         recordingLimitTimer = nil
         textInsertionContext = TextInsertion.captureContext()
+        let developerProfile = textInsertionContext.map {
+            DeveloperAppProfile.infer(
+                bundleIdentifier: $0.bundleIdentifier,
+                applicationName: $0.applicationName
+            )
+        } ?? .general
         state = .finishing
         inputMonitor?.stopMouseTracking()
         refreshMicrophoneMenu()
@@ -1785,7 +2050,7 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
             Task {
                 defer { try? FileManager.default.removeItem(at: audioURL) }
                 do {
-                    transcript = try await transcriber.transcribe(audioURL)
+                    transcript = try await transcriber.transcribe(audioURL, profile: developerProfile)
                     await waitForCaptures()
                     finishSession()
                 } catch {
@@ -1841,12 +2106,31 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
         }
         do {
             guard let session else { throw BetterVoiceError.sessionUnavailable }
+            let pasteImagesAfterText = transcriptionError == nil
+                && hadTranscript
+                && hasContext
+                && textInsertionContext != nil
+            if pasteImagesAfterText {
+                recordingHUD.showFinishingStatus("Pasting text…")
+                showStatus("Pasting text…")
+            }
             let result = try session.finish(
                 transcript: transcript,
                 insertionContext: textInsertionContext,
                 shouldCopyToClipboard: shouldCopyToClipboard
             )
-            let hasContext = !session.images.isEmpty
+            if pasteImagesAfterText,
+               result.transcriptInserted,
+               !session.images.isEmpty,
+               let insertionContext = textInsertionContext {
+                pasteImagesAfterTranscript(
+                    session.images,
+                    transcript: transcript,
+                    into: insertionContext,
+                    restoreClipboard: session.clipboardToRestore
+                )
+                return
+            }
             finishRecordingUI()
 
             if let transcriptionError {
@@ -1891,6 +2175,49 @@ private final class AppController: NSObject, NSApplicationDelegate, NSMenuDelega
             } else {
                 showError(error.localizedDescription)
             }
+        }
+    }
+
+    private func pasteImagesAfterTranscript(
+        _ images: [URL],
+        transcript: String,
+        into insertionContext: TextInsertion.Context,
+        restoreClipboard: [Clipboard.SavedItem]?
+    ) {
+        let expectedClipboardChangeCount = NSPasteboard.general.changeCount
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self else { return }
+            guard NSPasteboard.general.changeCount == expectedClipboardChangeCount else {
+                self.finishRecordingUI()
+                self.showStatus("Inserted transcript • images skipped", resetAfter: 4)
+                self.pruneSavedSessions()
+                return
+            }
+
+            self.recordingHUD.showFinishingStatus("Pasting images…")
+            self.showStatus("Pasting images…")
+            let copied = Clipboard.copy(transcript: "", images: images)
+            let imageClipboardChangeCount = NSPasteboard.general.changeCount
+            let pasted = copied && TextInsertion.paste(into: insertionContext)
+            if let restoreClipboard {
+                Clipboard.restore(restoreClipboard, ifChangeCount: NSPasteboard.general.changeCount)
+            } else if pasted, NSPasteboard.general.changeCount == imageClipboardChangeCount {
+                _ = Clipboard.copy(transcript: transcript, images: images)
+            }
+            self.finishRecordingUI()
+            let message: String
+            if pasted {
+                message = "Inserted transcript + context"
+            } else if copied && restoreClipboard == nil {
+                message = "Inserted transcript • images copied"
+            } else {
+                message = "Inserted transcript • image paste failed"
+            }
+            self.showStatus(
+                message,
+                resetAfter: 4
+            )
+            self.pruneSavedSessions()
         }
     }
 

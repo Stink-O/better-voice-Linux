@@ -169,6 +169,72 @@ final class CircleGestureDetectorTests: XCTestCase {
         XCTAssertNil(result)
     }
 
+    func testRejectsIrregularClosedLoop() {
+        var detector = CircleGestureDetector()
+        var result: CircleGesture?
+
+        for index in 0..<96 {
+            let angle = CGFloat(index) / 95 * 2 * .pi
+            let radius = 70 * (1 + 0.55 * sin(angle * 2))
+            result = detector.add(
+                point: CGPoint(x: 400 + radius * cos(angle), y: 300 + radius * sin(angle)),
+                at: Double(index) / 60
+            ) ?? result
+        }
+
+        XCTAssertNil(result)
+    }
+
+    func testRejectsPartialArc() {
+        var detector = CircleGestureDetector()
+        var result: CircleGesture?
+
+        for index in 0..<48 {
+            let angle = CGFloat(index) / 47 * (4 * .pi / 3)
+            result = detector.add(
+                point: CGPoint(x: 600 + 60 * cos(angle), y: 400 + 60 * sin(angle)),
+                at: Double(index) / 60
+            ) ?? result
+        }
+
+        XCTAssertNil(result)
+    }
+
+    func testRejectsHook() {
+        var detector = CircleGestureDetector()
+        var result: CircleGesture?
+        let points = (0..<48).map { index in
+            let progress = CGFloat(index) / 47
+            return CGPoint(
+                x: 600 + 100 * progress,
+                y: 400 + 60 * sin(progress * .pi) + 18 * progress
+            )
+        }
+
+        for (index, point) in points.enumerated() {
+            result = detector.add(point: point, at: Double(index) / 60) ?? result
+        }
+
+        XCTAssertNil(result)
+    }
+
+    func testRejectsZigzag() {
+        var detector = CircleGestureDetector()
+        var result: CircleGesture?
+
+        for index in 0..<60 {
+            result = detector.add(
+                point: CGPoint(
+                    x: 500 + CGFloat(index) * 2,
+                    y: 400 + (index.isMultiple(of: 2) ? 35 : -35)
+                ),
+                at: Double(index) / 60
+            ) ?? result
+        }
+
+        XCTAssertNil(result)
+    }
+
     func testLongContinuousLoopCapturesOnceUntilPointerLeaves() {
         var detector = CircleGestureDetector()
         let center = CGPoint(x: 400, y: 300)

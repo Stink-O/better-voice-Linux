@@ -94,7 +94,7 @@ public struct CircleGestureDetector {
         guard radius >= 18 else { return nil }
 
         let variance = distances.reduce(0) { $0 + pow($1 - radius, 2) } / CGFloat(distances.count)
-        guard sqrt(variance) / radius < 0.42 else { return nil }
+        guard sqrt(variance) / radius < 0.32 else { return nil }
 
         let closure = hypot(first.x - last.x, first.y - last.y)
         guard closure < max(20, radius * 0.65) else { return nil }
@@ -110,7 +110,7 @@ public struct CircleGestureDetector {
             while delta < -.pi { delta += 2 * .pi }
             angleTravel += abs(delta)
         }
-        guard angleTravel > 4.5, angleTravel < 8.8 else { return nil }
+        guard angleTravel > 5.93, angleTravel < 8.8 else { return nil }
 
         let pathLength = zip(points, points.dropFirst()).reduce(CGFloat.zero) {
             $0 + hypot($1.1.x - $1.0.x, $1.1.y - $1.0.y)

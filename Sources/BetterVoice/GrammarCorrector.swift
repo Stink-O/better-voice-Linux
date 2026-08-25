@@ -126,7 +126,9 @@ actor GrammarCorrector {
             )
             if isValidAsset(at: destination, sha256: asset.sha256) { continue }
 
-            let url = URL(string: GrammarModelAssets.baseURL + asset.path + "?download=true")!
+            guard let url = URL(string: GrammarModelAssets.baseURL + asset.path + "?download=true") else {
+                throw GrammarCorrectionError.invalidModelAsset(asset.path)
+            }
             let (temporaryURL, response) = try await URLSession.shared.download(from: url)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 throw GrammarCorrectionError.invalidModelAsset(asset.path)
@@ -141,7 +143,8 @@ actor GrammarCorrector {
     }
 
     private var modelDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory)
             .appendingPathComponent("BetterVoice", isDirectory: true)
             .appendingPathComponent(GrammarModelAssets.modelDirectoryName, isDirectory: true)
     }
@@ -244,7 +247,7 @@ actor GrammarCorrector {
     ) throws -> ORTValue {
         let data: NSMutableData
         if values.isEmpty {
-            data = NSMutableData(length: 0)!
+            data = NSMutableData(data: Data())
         } else {
             data = values.withUnsafeBufferPointer { buffer in
                 NSMutableData(bytes: buffer.baseAddress, length: buffer.count * MemoryLayout<T>.stride)

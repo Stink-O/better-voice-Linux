@@ -24,6 +24,7 @@ from typing import Callable, ClassVar
 
 from PyQt6 import QtCore, QtDBus
 
+from .. import workers
 from ..config import config
 from . import environment, portal
 
@@ -188,6 +189,11 @@ class PortalTextInsertionBackend(TextInsertionBackend):
     PERSIST_UNTIL_REVOKED = 2
 
     DEVICE_KEYBOARD = 1
+
+    #: QtDBus waits 25 seconds by default. Nothing here is worth freezing the
+    #: application for that long, and a tray menu that answers late enough
+    #: crashes Plasma's system tray rather than merely being slow.
+    PORTAL_TIMEOUT_MS = 5_000
 
     def __init__(self) -> None:
         super().__init__()
@@ -366,27 +372,57 @@ class PortalTextInsertionBackend(TextInsertionBackend):
         mime = str(arguments[1])
         serial = int(arguments[2])
 
-        interface = QtDBus.QDBusInterface(
-            portal.SERVICE, portal.OBJECT_PATH, CLIPBOARD_INTERFACE, self._bus
-        )
+        interface = self._clipboard_interface()
         reply = interface.call(
             "SelectionWrite", QtDBus.QDBusObjectPath(self._session_path), _uint32(serial)
         )
         arguments = reply.arguments()
-        written = False
-        if arguments and isinstance(arguments[0], QtDBus.QDBusUnixFileDescriptor):
-            descriptor = os.dup(arguments[0].fileDescriptor())
-            payload = self._payloads.get(mime, b"")
+        if not arguments or not isinstance(arguments[0], QtDBus.QDBusUnixFileDescriptor):
+            log.warning("The clipboard portal did not hand back a pipe: %s", reply.errorMessage())
+            self._finish_transfer(serial, False)
+            return
+
+        descriptor = os.dup(arguments[0].fileDescriptor())
+        payload = self._payloads.get(mime, b"")
+
+        def serve() -> bool:
+            """Fill the pipe on a worker thread.
+
+            A screenshot is megabytes and a pipe holds 64KB, so this blocks
+            until the other side has read the lot. On the GUI thread that
+            freezes the whole application -- and a tray menu that answers late
+            enough takes Plasma's system tray down with it.
+            """
+
             try:
                 with os.fdopen(descriptor, "wb") as handle:
                     handle.write(payload)
-                written = True
             except OSError as error:
                 log.warning("Could not serve %s to the clipboard: %s", mime, error)
-        else:
-            log.warning("The clipboard portal did not hand back a pipe: %s", reply.errorMessage())
+                return False
+            return True
 
-        interface.call(
+        workers.run(
+            serve,
+            lambda ok: self._finish_transfer(serial, ok),
+            lambda error: self._finish_transfer(serial, False, error),
+        )
+
+    def _clipboard_interface(self) -> QtDBus.QDBusInterface:
+        """The Clipboard portal, told not to wait 25 seconds for an answer."""
+
+        interface = QtDBus.QDBusInterface(
+            portal.SERVICE, portal.OBJECT_PATH, CLIPBOARD_INTERFACE, self._bus
+        )
+        interface.setTimeout(self.PORTAL_TIMEOUT_MS)
+        return interface
+
+    def _finish_transfer(self, serial: int, written: bool, error: object = None) -> None:
+        if error is not None:
+            log.warning("Could not serve the clipboard: %s", error)
+        if self._session_path is None:
+            return
+        self._clipboard_interface().call(
             "SelectionWriteDone",
             QtDBus.QDBusObjectPath(self._session_path),
             _uint32(serial),

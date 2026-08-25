@@ -1798,6 +1798,102 @@ class TestScreenshotsArePastedAfterTheTranscript:
         assert ("copy", True) in events, "the screenshots still belong on the clipboard"
 
 
+class TestServingTheClipboardDoesNotBlockTheGuiThread:
+    """A screenshot is megabytes; a pipe holds 64KB.
+
+    Writing the payload inline means the GUI thread waits for the other
+    application to read all of it. That is not merely slow: a tray menu that
+    answers late enough crashes Plasma's system tray, whose handler runs
+    against a QQuickItem that has since been destroyed.
+    """
+
+    def _backend(self, monkeypatch, fd):
+        from bettervoice.backends import textinject
+
+        from PyQt6 import QtDBus as _QtDBus
+
+        handed_back = _QtDBus.QDBusUnixFileDescriptor(fd)
+
+        class FakeReply:
+            @staticmethod
+            def arguments():
+                return [handed_back]
+
+            @staticmethod
+            def errorMessage():
+                return ""
+
+        calls: list = []
+
+        class FakeInterface:
+            def __init__(self, *_args):
+                pass
+
+            @staticmethod
+            def setTimeout(ms):
+                calls.append(("timeout", ms))
+
+            @staticmethod
+            def call(name, *args):
+                calls.append((name, args[-1] if args else None))
+                return FakeReply()
+
+        monkeypatch.setattr(textinject.QtDBus, "QDBusInterface", FakeInterface)
+        backend = textinject.PortalTextInsertionBackend()
+        backend._session_path = "/session"
+        backend._payloads = {"image/png": b"P" * 1_000_000}
+        return backend, calls
+
+    def _message(self, mime, serial):
+        from PyQt6 import QtDBus
+
+        message = QtDBus.QDBusMessage.createSignal(
+            "/session", "org.freedesktop.portal.Clipboard", "SelectionTransfer"
+        )
+        message.setArguments([QtDBus.QDBusObjectPath("/session"), mime, serial])
+        return message
+
+    def test_the_payload_is_written_off_the_gui_thread(self, qt_app, monkeypatch):
+        import os
+
+        from bettervoice.backends import textinject
+
+        read_fd, write_fd = os.pipe()
+        backend, _ = self._backend(monkeypatch, write_fd)
+
+        deferred: list = []
+        monkeypatch.setattr(
+            textinject.workers, "run",
+            lambda work, on_finished=None, on_failed=None: deferred.append(work),
+        )
+
+        backend._on_selection_transfer(self._message("image/png", 7))
+
+        assert deferred, "the payload was written on the calling thread"
+        os.close(read_fd)
+        os.close(write_fd)
+
+    def test_the_portal_is_not_given_twenty_five_seconds(self, qt_app, monkeypatch):
+        """QtDBus waits 25s by default, which is long enough to be the bug."""
+
+        import os
+
+        from bettervoice.backends import textinject
+
+        read_fd, write_fd = os.pipe()
+        backend, calls = self._backend(monkeypatch, write_fd)
+        monkeypatch.setattr(textinject.workers, "run", lambda *a, **k: None)
+
+        backend._on_selection_transfer(self._message("image/png", 7))
+
+        timeouts = [ms for kind, ms in calls if kind == "timeout"]
+        assert timeouts, "no timeout was set on the portal interface"
+        assert all(0 < ms <= 10_000 for ms in timeouts)
+        assert backend.PORTAL_TIMEOUT_MS <= 10_000
+        os.close(read_fd)
+        os.close(write_fd)
+
+
 class TestClipboardMimeTypesGoOutAsStrings:
     """`SetSelection` declares `mime_types` as `as`; PyQt sends `av` for a list.
 

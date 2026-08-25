@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "bettervoice"
 version = "0.1.0"
 description = "Voice dictation with the screen context you point at — Linux port"
-readme = "README-linux.md"
+readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 classifiers = [

@@ -44,7 +44,7 @@ Swift sources (`Sources/`, `Tests/`, `Package.swift`, `Info.plist`) are the unto
 | `bettervoice/doctor.py` | `bettervoice --doctor`, reports which backends resolved |
 | `bettervoice/resources/` | `.desktop`, icon SVG, AppStream metainfo, systemd user service |
 | `install.sh` / `uninstall.sh` | venv + desktop entry + icon install |
-| `README-linux.md` | User-facing docs |
+| `README.md` | User-facing docs; the macOS original's README lives upstream |
 
 ## Platform mapping
 

@@ -306,6 +306,41 @@ def _rich_html(transcript: str, images: list[Path]) -> str:
     return "".join(parts)
 
 
+def _image_payloads(images: list[Path]) -> dict[str, bytes]:
+    """Just the screenshots, with no text alongside them.
+
+    A selection carries one item and the receiving application chooses which of
+    the offered types to take -- and given the choice, nearly everything takes
+    the text. Offering only the pictures is what lets a paste be a picture.
+    """
+
+    payloads: dict[str, bytes] = {}
+    if not images:
+        return payloads
+    payloads["text/uri-list"] = "".join(
+        f"{QtCore.QUrl.fromLocalFile(str(path)).toString()}\r\n" for path in images
+    ).encode("utf-8")
+    try:
+        payloads["image/png"] = images[0].read_bytes()
+    except OSError as error:
+        log.debug("Could not read %s for the clipboard: %s", images[0], error)
+    return payloads
+
+
+def copy_images_only(images: list[Path], provider: object | None = None) -> bool:
+    """Put the screenshots on the clipboard with the transcript left off.
+
+    Only the portal path can do this: `wl-copy` claims one format at a time, and
+    a `QMimeData` without text still ends up offering text to some readers.
+    False means the caller should not expect a paste to produce a picture.
+    """
+
+    payloads = _image_payloads(images)
+    if not payloads or not _provider_serves_clipboard(provider):
+        return False
+    return provider.set_selection(payloads)
+
+
 def copy(transcript: str, images: list[Path], provider: object | None = None) -> bool:
     """Offer the transcript and, where the platform allows, the screenshots too.
 

@@ -1567,6 +1567,111 @@ class TestClipboardProtocolProbe:
         assert clipboard.unavailable_reason() is None
 
 
+class TestScreenshotsArePastedAfterTheTranscript:
+    """macOS delivered images and text in one keystroke; Wayland cannot.
+
+    A selection holds one item and the receiving application picks one type from
+    it. Offered text alongside pictures, it takes the text -- so the screenshots
+    need a selection of their own and a keystroke of their own.
+    """
+
+    def _controller(self, qt_app, monkeypatch, serves=True):
+        from bettervoice import app as app_module
+
+        monkeypatch.setattr(app_module.AppController, "__init__", lambda self, _a: None)
+        controller = app_module.AppController(qt_app)
+
+        events: list = []
+
+        class Insertion:
+            serves_clipboard = serves
+
+            @staticmethod
+            def set_selection(payloads):
+                events.append(("selection", sorted(payloads)))
+                return serves
+
+            @staticmethod
+            def paste(on_done):
+                events.append(("paste", None))
+                on_done(True)
+
+        controller.text_insertion = Insertion()
+        monkeypatch.setattr(
+            app_module.clipboard, "copy",
+            lambda t, i, p=None: events.append(("copy", bool(i))) or True,
+        )
+        monkeypatch.setattr(
+            app_module.clipboard, "restore",
+            lambda previous, only_if_holding=None: events.append(("restore", None)) or True,
+        )
+        # Run the settle timers immediately so the chain completes in the test.
+        monkeypatch.setattr(
+            app_module.QtCore.QTimer, "singleShot",
+            staticmethod(lambda _ms, callback: callback()),
+        )
+        monkeypatch.setattr(app_module.workers, "on_main_thread", lambda fn: fn)
+        return controller, events
+
+    def _images(self, tmp_path):
+        first = tmp_path / "context-1.png"
+        first.write_bytes(b"\x89PNG\r\n\x1a\n")
+        return [first]
+
+    def test_the_second_selection_offers_no_text(self, qt_app, monkeypatch, tmp_path):
+        """Offered text, a text field would paste the transcript a second time."""
+
+        controller, events = self._controller(qt_app, monkeypatch)
+
+        controller._paste_images_after("hello", self._images(tmp_path), True, None)
+
+        selections = [types for kind, types in events if kind == "selection"]
+        assert selections, "the screenshots were never offered"
+        offered = selections[0]
+        assert "image/png" in offered
+        assert not [mime for mime in offered if mime.startswith("text/plain")], (
+            "a text format here means a duplicated transcript"
+        )
+        assert "text/html" not in offered
+
+    def test_a_second_paste_is_sent(self, qt_app, monkeypatch, tmp_path):
+        controller, events = self._controller(qt_app, monkeypatch)
+
+        controller._paste_images_after("hello", self._images(tmp_path), True, None)
+
+        assert [kind for kind, _ in events].count("paste") == 1
+
+    def test_a_long_explanation_ends_holding_both(self, qt_app, monkeypatch, tmp_path):
+        controller, events = self._controller(qt_app, monkeypatch)
+
+        controller._paste_images_after("hello", self._images(tmp_path), True, None)
+
+        assert ("copy", True) in events, "the transcript and images should be left together"
+
+    def test_a_quick_note_puts_the_previous_clipboard_back(self, qt_app, monkeypatch, tmp_path):
+        """A quick note borrows the clipboard; it has to give it back."""
+
+        controller, events = self._controller(qt_app, monkeypatch)
+        previous = object()
+
+        controller._paste_images_after("hello", self._images(tmp_path), False, previous)
+
+        assert ("restore", None) in events
+        assert ("copy", True) not in events
+
+    def test_nothing_is_pasted_when_images_cannot_be_served_alone(
+        self, qt_app, monkeypatch, tmp_path
+    ):
+        """Without a portal clipboard there is no text-free selection to send."""
+
+        controller, events = self._controller(qt_app, monkeypatch, serves=False)
+
+        controller._paste_images_after("hello", self._images(tmp_path), True, None)
+
+        assert ("paste", None) not in events, "a keystroke with text on the clipboard duplicates it"
+        assert ("copy", True) in events, "the screenshots still belong on the clipboard"
+
+
 class TestClipboardMimeTypesGoOutAsStrings:
     """`SetSelection` declares `mime_types` as `as`; PyQt sends `av` for a list.
 

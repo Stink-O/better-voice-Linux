@@ -827,7 +827,11 @@ class AppController(QtCore.QObject):
             return
 
         def pasted(success: bool) -> None:
-            if success and copy_to_clipboard and images:
+            if success and images:
+                # The transcript has landed; send the screenshots after it.
+                self._paste_images_after(transcript, images, copy_to_clipboard, previous)
+                copied = copy_to_clipboard
+            elif success and copy_to_clipboard:
                 # Put the screenshots back alongside the transcript once the
                 # paste has landed -- unless the user has copied something else
                 # in the meantime, in which case their copy wins.
@@ -861,6 +865,54 @@ class AppController(QtCore.QObject):
             )
 
         self._paste_into_target(workers.on_main_thread(pasted))
+
+    def _paste_images_after(
+        self,
+        transcript: str,
+        images: list[Path],
+        copy_to_clipboard: bool,
+        previous,
+    ) -> None:
+        """Send the screenshots as a second paste, behind the transcript.
+
+        macOS put images and text on the pasteboard as separate items, so one
+        keystroke delivered both. A Wayland selection holds one item and the
+        receiving application picks a single type from it -- offered text, it
+        takes text every time. So the screenshots go in a selection of their
+        own and get their own keystroke.
+
+        Offering *only* the pictures is what makes the second keystroke safe: a
+        plain text field finds nothing it accepts and does nothing, rather than
+        pasting the transcript a second time.
+        """
+
+        def settle(callback) -> None:
+            QtCore.QTimer.singleShot(CLIPBOARD_SETTLE_MS, callback)
+
+        def finish() -> None:
+            """Leave the clipboard the way the mode says it should end up."""
+
+            if copy_to_clipboard:
+                clipboard.copy(transcript, images, self.text_insertion)
+            elif previous is not None:
+                clipboard.restore(previous)
+
+        if not clipboard.copy_images_only(images, self.text_insertion):
+            # Nothing can serve a picture on its own here, so there is no second
+            # paste to send; settle the clipboard as the mode asks and stop.
+            log.info("Screenshots cannot be pasted on this desktop; leaving them on disk")
+            settle(finish)
+            return
+
+        def send() -> None:
+            self.text_insertion.paste(workers.on_main_thread(delivered))
+
+        def delivered(success: bool) -> None:
+            if not success:
+                log.info("The screenshots were not pasted; they stay on the clipboard")
+            settle(finish)
+
+        settle(send)
 
     def _report_delivery(
         self,

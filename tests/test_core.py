@@ -143,6 +143,102 @@ class TestCircleGestureDetector:
 
         assert result is not None
 
+    def test_rejects_partial_arc(self):
+        """Reaching across the screen sweeps an arc; that is not a circle.
+
+        The detector once accepted 4.5 radians -- about 258 degrees -- so an
+        unclosed sweep captured the screen mid-sentence. It now wants very
+        nearly a full turn.
+        """
+
+        detector = CircleGestureDetector()
+        center = (400.0, 300.0)
+        result = None
+
+        # 335 degrees at this radius closes to within 43px, well inside the
+        # closure allowance -- so this is rejected on the angle travelled and
+        # nothing else, which is the threshold being pinned here.
+        for index in range(48):
+            angle = index / 47 * math.radians(335)
+            found = detector.add(
+                (center[0] + 100 * math.cos(angle), center[1] + 100 * math.sin(angle)),
+                at=index / 60,
+            )
+            result = found or result
+
+        assert result is None
+
+    def test_rejects_an_irregular_closed_loop(self):
+        """Closing back on yourself is not enough; the shape has to be round."""
+
+        detector = CircleGestureDetector()
+        center = (400.0, 300.0)
+        result = None
+
+        for index in range(60):
+            angle = index / 59 * 2 * math.pi
+            # A radius that swings far in and out: closed, but nothing like round.
+            wobble = 1 + 0.55 * math.sin(angle * 2)
+            found = detector.add(
+                (
+                    center[0] + 70 * wobble * math.cos(angle),
+                    center[1] + 70 * wobble * math.sin(angle),
+                ),
+                at=index / 60,
+            )
+            result = found or result
+
+        assert result is None
+
+    def test_rejects_a_hook(self):
+        """A flick out and back curves, returns near its start, and is not a circle."""
+
+        detector = CircleGestureDetector()
+        result = None
+
+        for index in range(40):
+            progress = index / 39
+            angle = progress * math.pi  # half a turn out...
+            x = 400 + 60 * math.cos(angle)
+            y = 300 + 60 * math.sin(angle) * (1 - progress * 0.6)
+            found = detector.add((x, y), at=index / 60)
+            result = found or result
+
+        assert result is None
+
+    def test_rejects_a_zigzag(self):
+        detector = CircleGestureDetector()
+        result = None
+
+        for index in range(40):
+            x = 300.0 + index * 12
+            y = 400.0 + (40 if index % 2 else -40)
+            found = detector.add((x, y), at=index / 60)
+            result = found or result
+
+        assert result is None
+
+    def test_still_recognizes_a_hand_drawn_circle(self):
+        """The tightening must not cost an ordinary, slightly wobbly circle."""
+
+        detector = CircleGestureDetector()
+        center = (500.0, 400.0)
+        result = None
+
+        for index in range(56):
+            angle = index / 55 * 2 * math.pi
+            wobble = 1 + 0.08 * math.sin(angle * 3)
+            found = detector.add(
+                (
+                    center[0] + 90 * wobble * math.cos(angle),
+                    center[1] + 76 * wobble * math.sin(angle),
+                ),
+                at=index / 60,
+            )
+            result = found or result
+
+        assert result is not None
+
     def test_rejects_straight_line(self):
         detector = CircleGestureDetector()
         result = None

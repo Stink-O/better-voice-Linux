@@ -109,7 +109,7 @@ class CircleGestureDetector:
             return None
 
         variance = sum((distance - radius) ** 2 for distance in distances) / len(distances)
-        if math.sqrt(variance) / radius >= 0.42:
+        if math.sqrt(variance) / radius >= 0.32:
             return None
 
         closure = math.hypot(first[0] - last[0], first[1] - last[1])
@@ -126,7 +126,9 @@ class CircleGestureDetector:
             while delta < -math.pi:
                 delta += 2 * math.pi
             angle_travel += abs(delta)
-        if not 4.5 < angle_travel < 8.8:
+        # Nearly a full turn. Loosen this and a hook or a partial arc drawn while
+        # reaching for something starts capturing the screen mid-sentence.
+        if not 5.93 < angle_travel < 8.8:
             return None
 
         path_length = sum(

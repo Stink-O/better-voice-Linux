@@ -1567,6 +1567,94 @@ class TestClipboardProtocolProbe:
         assert clipboard.unavailable_reason() is None
 
 
+class TestOurOwnOverlayStaysOutOfTheScreenshot:
+    """macOS excluded its own windows from the capture; the portal cannot.
+
+    `SCContentFilter(..., excludingApplications: ownApplication)` meant the
+    trail and HUD were never in a macOS screenshot. A portal screenshot takes
+    the screen exactly as it is, so the overlay has to stop drawing instead.
+    """
+
+    def _overlay(self, qt_app):
+        from bettervoice.ui.overlay import RecordingOverlay
+
+        overlay = RecordingOverlay()
+        overlay.hud.visible = True
+        overlay.start()
+        return overlay
+
+    def test_a_suppressed_window_draws_nothing(self, qt_app):
+        """The whole point: no trail, no HUD, no pulse in the captured pixels."""
+
+        import time
+
+        from PyQt6 import QtGui
+        from bettervoice.ui.overlay import HUDModel, _OverlayWindow
+
+        screen = QtGui.QGuiApplication.primaryScreen()
+        window = _OverlayWindow(screen, HUDModel(microphone="mic", visible=True), True)
+        window.shows_hud = True
+        window.resize(400, 300)
+        now = time.monotonic()
+        for index in range(15):
+            window.add((50 + index * 10, 150), now)
+        window.confirm((200, 150), 40, now)
+
+        def inked() -> int:
+            image = window.grab().toImage()
+            return sum(
+                1
+                for y in range(0, image.height(), 3)
+                for x in range(0, image.width(), 3)
+                if image.pixelColor(x, y).alpha() > 12
+            )
+
+        assert inked() > 0, "nothing was drawn to begin with, so this proves nothing"
+        window.suppressed = True
+        assert inked() == 0
+        window.suppressed = False
+        assert inked() > 0, "the overlay has to come back after the capture"
+
+    def test_hiding_reports_whether_anything_was_showing(self, qt_app):
+        from bettervoice.ui.overlay import RecordingOverlay
+
+        idle = RecordingOverlay()
+        assert idle.hide_from_capture() is False, "nothing on screen, nothing to blank"
+
+        overlay = self._overlay(qt_app)
+        assert overlay.hide_from_capture() is True
+        assert all(window.suppressed for window in overlay._windows)
+        overlay.close()
+
+    def test_showing_again_clears_every_cached_window(self, qt_app):
+        """A window hidden between recordings must not come back still blanked."""
+
+        overlay = self._overlay(qt_app)
+        overlay.hide_from_capture()
+        overlay.stop()  # hides the windows, keeping them cached
+
+        overlay.show_after_capture()
+
+        assert not any(window.suppressed for window in overlay._cache.values())
+        overlay.close()
+
+    def test_the_trail_survives_the_capture(self, qt_app):
+        """Blanking is for the screenshot only; the drawing is not thrown away."""
+
+        import time
+
+        overlay = self._overlay(qt_app)
+        now = time.monotonic()
+        overlay.add((10.0, 10.0), now)
+        overlay.add((20.0, 20.0), now)
+
+        overlay.hide_from_capture()
+        overlay.show_after_capture()
+
+        assert overlay._windows[0]._trail, "the trail should outlast the screenshot"
+        overlay.close()
+
+
 class TestScreenshotsArePastedAfterTheTranscript:
     """macOS delivered images and text in one keystroke; Wayland cannot.
 

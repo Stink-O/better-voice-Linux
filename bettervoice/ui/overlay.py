@@ -97,6 +97,11 @@ class _OverlayWindow(QtWidgets.QWidget):
         self._hud = hud
         self.reduce_motion = reduce_motion
         self.shows_hud = False
+        #: True while a screenshot is being taken, so our own drawing stays out
+        #: of it. macOS excluded the whole application from the capture; a
+        #: portal screenshot takes the screen as it is, so the only way to keep
+        #: the trail and HUD out of the picture is not to be drawing them.
+        self.suppressed = False
         self._trail: list[_TrailPoint] = []
         self._confirmations: list[_Confirmation] = []
         self.setScreen(screen)
@@ -158,6 +163,10 @@ class _OverlayWindow(QtWidgets.QWidget):
         painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_Source)
         painter.fillRect(self.rect(), QtCore.Qt.GlobalColor.transparent)
         painter.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
+
+        if self.suppressed:
+            painter.end()
+            return
 
         now = time.monotonic()
         self._paint_trail(painter, now)
@@ -407,6 +416,29 @@ class RecordingOverlay(QtCore.QObject):
             window.hide()
             window.deleteLater()
         self._cache.clear()
+
+    def hide_from_capture(self) -> bool:
+        """Blank our own drawing so a screenshot does not contain it.
+
+        Returns whether anything was actually showing. ``repaint()`` rather than
+        ``update()``: the cleared frame has to be painted before the capture is
+        asked for, not queued behind it.
+        """
+
+        if not self._windows:
+            return False
+        for window in self._windows:
+            window.suppressed = True
+            window.repaint()
+        return True
+
+    def show_after_capture(self) -> None:
+        """Put our drawing back once the screenshot has been taken."""
+
+        for window in self._cache.values():
+            window.suppressed = False
+        for window in self._windows:
+            window.update()
 
     def stop_trail(self) -> None:
         """Clear the drawing but keep the HUD on screen while finishing."""

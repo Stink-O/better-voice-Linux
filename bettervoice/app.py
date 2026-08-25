@@ -59,6 +59,11 @@ RECORDING_LIMIT_MS = 20 * 60 * 1_000
 #: How long the clipboard is left holding text-only so the paste lands.
 CLIPBOARD_SETTLE_MS = 300
 
+#: How long to let a blanked overlay reach the screen before capturing. macOS
+#: excluded its own windows from the capture outright; here the overlay has to
+#: stop drawing and the compositor has to show that, which takes a frame or two.
+CAPTURE_BLANK_MS = 48
+
 #: Breathing room after bringing the target window back before typing into it.
 FOCUS_SETTLE_MS = 120
 
@@ -672,12 +677,25 @@ class AppController(QtCore.QObject):
 
         def done(error: Exception | None) -> None:
             self._capturing = False
+            if not self._pending_gestures:
+                # Only once the queue is empty; blanking and restoring between
+                # back-to-back captures would flicker for no benefit.
+                self.overlay.show_after_capture()
             self._on_capture_done(gesture, destination, output, error)
             self._drain_captures()
             if not self._pending_gestures:
                 self._captures_settled()
 
-        self.screenshots.capture(gesture, destination, workers.on_main_thread(done))
+        def take() -> None:
+            self.screenshots.capture(gesture, destination, workers.on_main_thread(done))
+
+        if self.overlay.hide_from_capture():
+            # The blanked frame has to reach the screen before the portal reads
+            # it, and a repaint is not on screen until the compositor has
+            # composited it.
+            QtCore.QTimer.singleShot(CAPTURE_BLANK_MS, take)
+        else:
+            take()
 
     def _on_capture_done(
         self,
